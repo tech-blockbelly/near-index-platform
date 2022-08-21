@@ -21,7 +21,7 @@ use near_contract_standards::fungible_token::metadata::{
 use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LazyOption;
-use near_sdk::json_types::{U128,U64};
+use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
     env, log, near_bindgen, AccountId, Balance, PanicOnDefault, Promise, PromiseError,
@@ -39,10 +39,13 @@ pub struct Contract {
     input_token: String,
     min_investment: U128,
     token_manager: String,
-    base_price:U128,
-    manager_fee_percent:U64, // 1% -> 100 and 100% -> 10000
-    platform_fee_percent:U64, // 1% -> 100 and 100% -> 10000
-    distributor_fee_percent:U64 // 1% -> 100 and 100% -> 10000
+    base_price: U128,
+    manager_fee_percent: U128,  // 1% -> 100 and 100% -> 10000
+    platform_fee_percent: U128, // 1% -> 100 and 100% -> 10000
+    distributor_fee_percent: U128, // 1% -> 100 and 100% -> 10000
+    manager:AccountId,
+    platform:AccountId,
+    distributor:AccountId
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,11 +62,18 @@ pub struct Action {
 #[ext_contract(ext_refcontract)]
 trait Exchange {
     fn swap(&mut self, actions: Vec<Action>);
+    fn withdraw(&mut self, token_id: AccountId, amount: U128);
 }
 
 #[ext_contract(extft)]
 trait ExtFt {
-    fn ft_transfer_call(&mut self, receiver_id: AccountId,amount: U128,msg: String)->Promise;
+    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, msg: String) -> Promise;
+    fn ft_transfer_call(
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128>;
 }
 
 // Cross Contract Callback trait
@@ -102,10 +112,13 @@ impl Contract {
         input_token: String,
         min_investment: U128,
         token_manager: String,
-        base_price:U128,
-        manager_fee_percent:U64,
-        platform_fee_percent:U64,
-        distributor_fee_percent:U64
+        base_price: U128,
+        manager_fee_percent: U128,
+        platform_fee_percent: U128,
+        distributor_fee_percent: U128,
+        manager:AccountId,
+        platform:AccountId,
+        distributor:AccountId
     ) -> Self {
         Self::new(
             owner_id,
@@ -127,7 +140,10 @@ impl Contract {
             base_price,
             manager_fee_percent,
             platform_fee_percent,
-            distributor_fee_percent
+            distributor_fee_percent,
+            manager,
+            platform,
+            distributor
         )
     }
 
@@ -143,10 +159,13 @@ impl Contract {
         input_token: String,
         min_investment: U128,
         token_manager: String,
-        base_price:U128,
-        manager_fee_percent:U64,
-        platform_fee_percent:U64,
-        distributor_fee_percent:U64
+        base_price: U128,
+        manager_fee_percent: U128,
+        platform_fee_percent: U128,
+        distributor_fee_percent: U128,
+        manager:AccountId,
+        platform:AccountId,
+        distributor:AccountId
     ) -> Self {
         assert!(!env::state_exists(), "Already initialized");
         metadata.assert_valid();
@@ -160,7 +179,10 @@ impl Contract {
             base_price,
             manager_fee_percent,
             platform_fee_percent,
-            distributor_fee_percent
+            distributor_fee_percent,
+            manager,
+            platform,
+            distributor
         };
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -247,15 +269,30 @@ impl Contract {
     }
 
     #[payable]
-    pub fn buy_token(&mut self,amount:U128,token_list:Vec<String>,token_deposits:Vec<String>)->Promise{
-        log!("The call is initiated by {}", env::signer_account_id());
-        log!("Attached amount is {:?}", amount);
-        let amount_u128:u128=amount.into();
+    pub fn buy_token(
+        &mut self,
+        amount: U128,
+        token_list: Vec<String>,
+        token_deposits: Vec<String>,
+    ) -> Promise {
+        log!("The buy_token call is initiated by {} with {:?} attached amount", env::signer_account_id(),amount);
+        let amount_u128: u128 = amount.into();
         assert!(
             amount_u128 > self.min_investment.into(),
             "Attached amount is less then Minimum amount"
         );
-        let tokendeposit=gethash(token_list,token_deposits);
+        // deduct management fee, platform fee, and distributor fee
+        let manager_fee_percent: u128 = self.manager_fee_percent.into();
+        let platform_fee_percent: u128 = self.platform_fee_percent.into();
+        let distributor_fee_percent: u128 = self.distributor_fee_percent.into();
+        let manager_fee=(manager_fee_percent*amount_u128)/10000;
+        let platform_fee=(platform_fee_percent*amount_u128)/10000;
+        let distributor_fee=(distributor_fee_percent*amount_u128)/10000;
+         
+        let duductionfee: u128 = manager_fee+platform_fee+distributor_fee;
+        let amount_after_deduction=amount_u128-duductionfee;
+
+        let tokendeposit = gethash(token_list, token_deposits);
         let mut action_list: Vec<Action> = Vec::with_capacity(5);
         let token_pool: HashMap<String, i32> = HashMap::from([
             ("hapi.fakes.testnet".to_string(), 114),
@@ -264,48 +301,49 @@ impl Contract {
             ("usdt.fakes.testnet".to_string(), 31),
             ("paras.fakes.testnet".to_string(), 299),
         ]);
-        // for now 
-        let base_token_price:u128=self.base_price.into();
-        let index_token_u128: u128 = (amount_u128 / base_token_price).into();
+        let base_token_price: u128 = self.base_price.into();
+        let base_token_price_f64:f64=base_token_price.to_string().parse().unwrap();
+        let amount_after_deduction_64:f64=amount_after_deduction.to_string().parse().unwrap();
+        // index_token_u128 is multiplied by 10000000 because the index token's decimals is 8
+        let index_token_u128: u128 = (amount_after_deduction_64 / base_token_price_f64*10000000.0) as u128;
 
         for (token_addr, token_perc) in self.token_allocation.iter() {
             // let token_count: u128 = token_perc.parse().unwrap();
-            let token_count:String=tokendeposit.get(token_addr).unwrap().into();
+            let token_count: String = tokendeposit.get(token_addr).unwrap().into();
             let poolid = token_pool.get(token_addr).unwrap().clone();
             let t = Action {
                 pool_id: poolid as u32,
                 token_in: self.input_token.clone(),
-                amount_in: (index_token_u128*token_count.parse::<u128>().unwrap()).to_string(),
+                amount_in: (token_count.parse::<u128>().unwrap()).to_string(),
                 token_out: token_addr.clone(),
                 min_amount_out: "1".to_string(),
             };
             // log!("{:?}",t); to enable this add #[derive(Debug)] to Action
             action_list.push(t);
         }
+        let promise_a=extft::ext("ref.fakes.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .ft_transfer_call("ref-finance-101.testnet".parse().unwrap(),amount_after_deduction.into(),Some("".to_string()),"".to_string());
 
-        // let promise_A=extft::ext("ref-finance-101.testnet".parse().unwrap())
-        //     .with_attached_deposit(1)
-        //     .with_static_gas(C_GAS)
-        //     .ft_transfer_call(env::current_account_id(),amount,"".to_string());
-                
+        let index_token: U128 = (10000000 * index_token_u128).into();
 
         let promise = ext_refcontract::ext("ref-finance-101.testnet".parse().unwrap())
             .with_attached_deposit(1)
             .with_static_gas(C_GAS)
             .swap(action_list);
-
-        let index_token:U128=(1000000000000000000000000*index_token_u128).into(); 
-
-        return promise.then(
+            
+        return promise_a
+        .then(promise)
+        .then(
             Self::ext(env::current_account_id())
                 .with_static_gas(C_GAS)
-                .mint_index(env::signer_account_id(), index_token)
+                .mint_index(env::signer_account_id(), index_token,manager_fee.into(),platform_fee.into(),distributor_fee.into()),
         );
-         
     }
 
     #[payable]
-    pub fn sell_token(&mut self, index_token: U128)->Promise {
+    pub fn sell_token(&mut self, index_token: U128) -> Promise {
         log!("The call is initiated by {}", env::signer_account_id());
         let current_balance = self.ft_balance_of(env::signer_account_id());
         assert!(current_balance >= index_token, "Insufficient Index token");
@@ -318,19 +356,21 @@ impl Contract {
             ("usdt.fakes.testnet".to_string(), 31),
             ("paras.fakes.testnet".to_string(), 299),
         ]);
-        let index_token_u128:u128=index_token.into();
+        let total_token_to_return:u128=0;
+        let index_token_u128: u128 = index_token.into();
         for (token_addr, token_count) in self.token_allocation.iter() {
             let token_count: u128 = token_count.parse().unwrap();
             let poolid = token_pool.get(token_addr).unwrap().clone();
             let t = Action {
                 pool_id: poolid as u32,
                 token_in: token_addr.clone(),
-                amount_in:(index_token_u128*token_count).to_string(),
+                amount_in: ((index_token_u128.to_string().parse::<f64>().unwrap()/10000000.0 * token_count.to_string().parse::<f64>().unwrap()) as u128).to_string(),
                 token_out: self.input_token.clone(),
                 min_amount_out: "1".to_string(),
             };
             action_list.push(t);
         }
+        let input_token_to_withdraw: U128 = "5000000000000000".parse::<u128>().unwrap().into();
         let promise = ext_refcontract::ext("ref-finance-101.testnet".parse().unwrap())
             .with_attached_deposit(1)
             .with_static_gas(C_GAS)
@@ -338,26 +378,77 @@ impl Contract {
         return promise.then(
             Self::ext(env::current_account_id())
                 .with_static_gas(C_GAS)
-                .burn_index(env::signer_account_id(), index_token)
+                .call_withdraw_for(
+                    env::signer_account_id(),
+                    input_token_to_withdraw,
+                    index_token,
+                ),
+        );
+         
+    }
+    
+    #[private]
+    pub fn call_withdraw_for(
+        &mut self,
+        account: AccountId,
+        input_token_to_withdraw: U128,
+        index_token_to_burn: U128,
+        #[callback_result] call_result: Result<String, PromiseError>,
+    ) -> Promise {
+        assert!(
+            call_result.is_err() == false,
+            "There is a error:Swap failed"
+        );
+        log!(
+            "Calling call_withdraw and the signer is {}",
+            env::signer_account_id()
+        );
+        // assert!(call_result.ok()!=None,"Swap failed");
+        let promise = ext_refcontract::ext("ref-finance-101.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .withdraw(
+                "ref.fakes.testnet".parse().unwrap(),
+                input_token_to_withdraw,
+            );
+        return promise.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(C_GAS)
+                .burn_index(account, index_token_to_burn, input_token_to_withdraw),
         );
     }
+
     #[private]
     pub fn burn_index(
         &mut self,
         account_id: AccountId,
         index_token: U128,
+        input_token_to_return: U128,
         #[callback_result] call_result: Result<String, PromiseError>,
     ) -> String {
         if call_result.is_err() {
-            return "There was a error while making a exchange".to_string();
+            return "There was a error while making exchange on Ref finance".to_string();
         }
-        log!("Calling Burn_Index");
-        self.ft_burn(account_id, index_token);
-        let returnstr = format!(
-            "Burned {:?} index tokens from {:?}",
-            index_token,
+        log!(
+            "Calling Burn_Index and the signer is {}",
             env::signer_account_id()
         );
+        self.ft_burn(account_id, index_token);
+        let returnstr = format!(
+            "Burned {:?} index tokens from {:?} and returned {:?} {:?}",
+            index_token,
+            env::signer_account_id(),
+            input_token_to_return,
+            self.input_token
+        );
+        extft::ext("ref.fakes.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .ft_transfer(
+                env::signer_account_id(),
+                input_token_to_return,
+                "".to_string(),
+            );
         returnstr
     }
 
@@ -366,6 +457,9 @@ impl Contract {
         &mut self,
         receiver_id: AccountId,
         amount: U128,
+        manager_fee:U128,
+        platform_fee:U128,
+        distributor_fee:U128,
         #[callback_result] call_result: Result<String, PromiseError>,
     ) -> String {
         if call_result.is_err() {
@@ -373,6 +467,31 @@ impl Contract {
         }
         log!("Calling Mint_Index");
         self.ft_mint(receiver_id, amount);
+        // transfer the commision to manager,platform and distributors
+        extft::ext("ref.fakes.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .ft_transfer(
+                self.manager.clone(),
+                manager_fee,
+                "manager fee".to_string(),
+            );
+        extft::ext("ref.fakes.testnet".parse().unwrap())
+        .with_attached_deposit(1)
+        .with_static_gas(C_GAS)
+        .ft_transfer(
+            self.platform.clone(),
+            platform_fee,
+            "platform fee".to_string(),
+        );
+        extft::ext("ref.fakes.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .ft_transfer(
+                self.distributor.clone(),
+                distributor_fee,
+                "distributor fee".to_string(),
+            );
         let returnstr = format!(
             "Minted {:?}  token to {:?}",
             amount,
@@ -389,13 +508,12 @@ impl Contract {
         self.input_token = input_token;
         log!("Input token updated to {}", self.input_token);
     }
-    
     pub fn update_base_price(&mut self, base_price: U128) {
         assert!(
             env::current_account_id() == env::signer_account_id(),
             "Only Contract owner can Update base price"
         );
-        self.base_price=base_price;
+        self.base_price = base_price;
         log!("Base price updated to {:?}", self.base_price);
     }
     pub fn ft_token_allocation(&self) -> HashMap<String, String> {
@@ -406,9 +524,12 @@ impl Contract {
         self.min_investment.clone()
     }
 
-    pub fn bof(&mut self) {
-        let a:U128="100000".parse::<u128>().unwrap().into();
-        self.base_price=a;
+    pub fn bof(&mut self, tokens: U128) {
+        log!("trying to make a ft_transfer ");
+        extft::ext("ref.fakes.testnet".parse().unwrap())
+            .with_attached_deposit(1)
+            .with_static_gas(C_GAS)
+            .ft_transfer_call(env::signer_account_id(), tokens,Some("".to_string()), "".to_string());
     }
 
     pub fn update_token_allocation(&mut self, token_list: Vec<String>, token_alloc: Vec<String>) {
@@ -467,9 +588,13 @@ mod tests {
             "10000".parse::<u128>().unwrap().into(),
             "Manager_name".to_string(),
             "100000".parse::<u128>().unwrap().into(),
-            "200".parse::<u64>().unwrap().into(),
-            "50".parse::<u64>().unwrap().into(),
-            "50".parse::<u64>().unwrap().into(),
+            "200".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "manager.testnet".parse().unwrap(),
+            "platform.testnet".parse().unwrap(),
+            "distributor.testnet".parse().unwrap(),
+
         );
         testing_env!(context.is_view(true).build());
         assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY);
@@ -498,9 +623,12 @@ mod tests {
             "10000".parse::<u128>().unwrap().into(),
             "Manager_name".to_string(),
             "100000".parse::<u128>().unwrap().into(),
-            "200".parse::<u64>().unwrap().into(),
-            "50".parse::<u64>().unwrap().into(),
-            "50".parse::<u64>().unwrap().into(),
+            "200".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "manager.testnet".parse().unwrap(),
+            "platform.testnet".parse().unwrap(),
+            "distributor.testnet".parse().unwrap(),
         );
         testing_env!(context
             .storage_usage(env::storage_usage())
