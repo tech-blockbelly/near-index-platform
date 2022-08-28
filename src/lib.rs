@@ -18,10 +18,11 @@ NOTES:
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
+use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LazyOption;
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{U128};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
     env, log, near_bindgen, AccountId, Balance, PanicOnDefault, Promise, PromiseError,
@@ -36,7 +37,7 @@ pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
     token_allocation: HashMap<String, String>,
-    input_token: String,
+    input_token: AccountId,
     min_investment: U128,
     token_manager: String,
     base_price: U128,
@@ -109,7 +110,7 @@ impl Contract {
         total_supply: U128,
         token_list: Vec<String>,
         token_alloc: Vec<String>,
-        input_token: String,
+        input_token: AccountId,
         min_investment: U128,
         token_manager: String,
         base_price: U128,
@@ -156,7 +157,7 @@ impl Contract {
         metadata: FungibleTokenMetadata,
         token_list: Vec<String>,
         token_alloc: Vec<String>,
-        input_token: String,
+        input_token: AccountId,
         min_investment: U128,
         token_manager: String,
         base_price: U128,
@@ -313,7 +314,7 @@ impl Contract {
             let poolid = token_pool.get(token_addr).unwrap().clone();
             let t = Action {
                 pool_id: poolid as u32,
-                token_in: self.input_token.clone(),
+                token_in: std::string::String::from(self.input_token.clone()),
                 amount_in: (token_count.parse::<u128>().unwrap()).to_string(),
                 token_out: token_addr.clone(),
                 min_amount_out: "1".to_string(),
@@ -326,7 +327,7 @@ impl Contract {
             .with_static_gas(C_GAS)
             .ft_transfer_call("ref-finance-101.testnet".parse().unwrap(),amount_after_deduction.into(),Some("".to_string()),"".to_string());
 
-        let index_token: U128 = (10000000 * index_token_u128).into();
+        let index_token: U128 = index_token_u128.into();
 
         let promise = ext_refcontract::ext("ref-finance-101.testnet".parse().unwrap())
             .with_attached_deposit(1)
@@ -356,7 +357,6 @@ impl Contract {
             ("usdt.fakes.testnet".to_string(), 31),
             ("paras.fakes.testnet".to_string(), 299),
         ]);
-        let total_token_to_return:u128=0;
         let index_token_u128: u128 = index_token.into();
         for (token_addr, token_count) in self.token_allocation.iter() {
             let token_count: u128 = token_count.parse().unwrap();
@@ -365,7 +365,7 @@ impl Contract {
                 pool_id: poolid as u32,
                 token_in: token_addr.clone(),
                 amount_in: ((index_token_u128.to_string().parse::<f64>().unwrap()/10000000.0 * token_count.to_string().parse::<f64>().unwrap()) as u128).to_string(),
-                token_out: self.input_token.clone(),
+                token_out: std::string::String::from(self.input_token.clone()),
                 min_amount_out: "1".to_string(),
             };
             action_list.push(t);
@@ -500,7 +500,7 @@ impl Contract {
         returnstr
     }
 
-    pub fn update_input_token(&mut self, input_token: String) {
+    pub fn update_input_token(&mut self, input_token: AccountId) {
         assert!(
             env::current_account_id() == env::signer_account_id(),
             "Only Contract owner can Update input tokens"
@@ -524,13 +524,8 @@ impl Contract {
         self.min_investment.clone()
     }
 
-    pub fn bof(&mut self, tokens: U128) {
-        log!("trying to make a ft_transfer ");
-        extft::ext("ref.fakes.testnet".parse().unwrap())
-            .with_attached_deposit(1)
-            .with_static_gas(C_GAS)
-            .ft_transfer_call(env::signer_account_id(), tokens,Some("".to_string()), "".to_string());
-    }
+
+
 
     pub fn update_token_allocation(&mut self, token_list: Vec<String>, token_alloc: Vec<String>) {
         self.token_allocation = gethash(token_list, token_alloc);
@@ -552,6 +547,14 @@ near_contract_standards::impl_fungible_token_storage!(Contract, token, on_accoun
 impl FungibleTokenMetadataProvider for Contract {
     fn ft_metadata(&self) -> FungibleTokenMetadata {
         self.metadata.get().unwrap()
+    }
+}
+
+#[near_bindgen]
+impl FungibleTokenReceiver for Contract{
+    fn ft_on_transfer(&mut self,sender_id: AccountId, amount: U128, msg: String)->PromiseOrValue<U128>{
+        // tokens entered into the contract won't be returned 
+        PromiseOrValue::Value(0u128.into())
     }
 }
 
@@ -584,7 +587,7 @@ mod tests {
             TOTAL_SUPPLY.into(),
             vec![],
             vec![],
-            "NEAR".to_string(),
+            AccountId::try_from("near.testnet".to_string()).unwrap(),
             "10000".parse::<u128>().unwrap().into(),
             "Manager_name".to_string(),
             "100000".parse::<u128>().unwrap().into(),
@@ -619,7 +622,7 @@ mod tests {
             TOTAL_SUPPLY.into(),
             vec![],
             vec![],
-            "NEAR".to_string(),
+            AccountId::try_from("near.testnet".to_string()).unwrap(),
             "10000".parse::<u128>().unwrap().into(),
             "Manager_name".to_string(),
             "100000".parse::<u128>().unwrap().into(),
