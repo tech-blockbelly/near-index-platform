@@ -81,7 +81,16 @@ trait ExtFt {
 // Cross Contract Callback trait
 #[ext_contract(ext_refcontract_callback)]
 trait ExchangeCallback {
-    fn mint_index(&mut self, receiver_id: AccountId, amount: U128) -> String;
+    fn mint_index(
+        &mut self,
+        receiver_id: AccountId,
+        index_token: U128,
+        amount: U128,
+        manager_fee: U128,
+        platform_fee: U128,
+        distributor_fee: U128,
+        #[callback_result] call_result: Result<String, PromiseError>,
+    ) -> String;
     fn burn_index(&mut self, account_id: AccountId, index_token: U128) -> String;
 }
 
@@ -356,10 +365,11 @@ impl Contract {
 
         return promise_a.then(promise).then(
             Self::ext(env::current_account_id())
-                .with_static_gas(C_GAS)
+                .with_static_gas(Gas(30_000_000_000_000))
                 .mint_index(
                     env::signer_account_id(),
                     index_token,
+                    amount,
                     manager_fee.into(),
                     platform_fee.into(),
                     distributor_fee.into(),
@@ -467,6 +477,7 @@ impl Contract {
     pub fn mint_index(
         &mut self,
         receiver_id: AccountId,
+        index_token: U128,
         amount: U128,
         manager_fee: U128,
         platform_fee: U128,
@@ -474,10 +485,24 @@ impl Contract {
         #[callback_result] call_result: Result<String, PromiseError>,
     ) -> String {
         if call_result.is_err() {
+            ext_refcontract::ext(REF_FINANCE_CONTRACT.parse().unwrap())
+                .with_attached_deposit(1)
+                .with_static_gas(Gas(15_000_000_000_000))
+                .withdraw(self.input_token.to_owned(), amount)
+                .then(
+                    extft::ext(self.input_token.clone())
+                        .with_attached_deposit(1)
+                        .with_static_gas(C_GAS)
+                        .ft_transfer(
+                            receiver_id,
+                            amount,
+                            "Refund amount for failed Exchange".to_string(),
+                        ),
+                );
             return "There was a error while making exchange".to_string();
         }
         log!("Calling Mint_Index");
-        self.ft_mint(receiver_id, amount);
+        self.ft_mint(receiver_id, index_token);
         // transfer the commision to manager,platform and distributors
         extft::ext(self.input_token.clone())
             .with_attached_deposit(1)
@@ -501,7 +526,7 @@ impl Contract {
             );
         let returnstr = format!(
             "Minted {:?}  token to {:?}",
-            amount,
+            index_token,
             env::signer_account_id()
         );
         returnstr
