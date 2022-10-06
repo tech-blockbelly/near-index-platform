@@ -25,7 +25,7 @@ use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
-    env, log, near_bindgen, AccountId, Balance, PanicOnDefault, Promise, PromiseError,
+    env, log, near_bindgen, serde_json, AccountId, Balance, PanicOnDefault, Promise, PromiseError,
     PromiseOrValue,
 };
 use near_sdk::{ext_contract, Gas};
@@ -76,6 +76,7 @@ trait ExtFt {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128>;
+    fn buy_token(&mut self, amount: U128, token_list: Vec<AccountId>, token_deposits: Vec<U128>);
 }
 
 // Cross Contract Callback trait
@@ -92,6 +93,18 @@ trait ExchangeCallback {
         #[callback_result] call_result: Result<String, PromiseError>,
     ) -> String;
     fn burn_index(&mut self, account_id: AccountId, index_token: U128) -> String;
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+#[serde(untagged)]
+#[derive(Debug)]
+enum TokenReceiverMessage {
+    MessageContent {
+        amount: U128,
+        token_list: Vec<AccountId>,
+        token_deposits: Vec<U128>,
+    },
 }
 
 const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 288 288'%3E%3Cg id='l' data-name='l'%3E%3Cpath d='M187.58,79.81l-30.1,44.69a3.2,3.2,0,0,0,4.75,4.2L191.86,103a1.2,1.2,0,0,1,2,.91v80.46a1.2,1.2,0,0,1-2.12.77L102.18,77.93A15.35,15.35,0,0,0,90.47,72.5H87.34A15.34,15.34,0,0,0,72,87.84V201.16A15.34,15.34,0,0,0,87.34,216.5h0a15.35,15.35,0,0,0,13.08-7.31l30.1-44.69a3.2,3.2,0,0,0-4.75-4.2L96.14,186a1.2,1.2,0,0,1-2-.91V104.61a1.2,1.2,0,0,1,2.12-.77l89.55,107.23a15.35,15.35,0,0,0,11.71,5.43h3.13A15.34,15.34,0,0,0,216,201.16V87.84A15.34,15.34,0,0,0,200.66,72.5h0A15.35,15.35,0,0,0,187.58,79.81Z'/%3E%3C/g%3E%3C/svg%3E";
@@ -306,6 +319,7 @@ impl Contract {
             env::signer_account_id(),
             amount
         );
+
         let amount_u128: u128 = amount.into();
         assert!(
             amount_u128 > self.min_investment.into(),
@@ -597,8 +611,32 @@ impl FungibleTokenReceiver for Contract {
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        // tokens entered into the contract won't be returned
-        PromiseOrValue::Value(0u128.into())
+        let input_token = env::predecessor_account_id();
+        if input_token != self.input_token {
+            log!("The Contract does not take {} as a Input Token",input_token);
+            PromiseOrValue::Value(amount)
+        } else {
+            if msg.is_empty() {
+                // funds transfered to contract without msg won't be refunded
+                PromiseOrValue::Value(U128(0))
+            } else {
+                let message =
+                    serde_json::from_str::<TokenReceiverMessage>(&msg).expect("Invalid msg Format");
+                match message {
+                    TokenReceiverMessage::MessageContent {
+                        amount,
+                        token_list,
+                        token_deposits,
+                    } => {
+                        extft::ext(env::current_account_id())
+                            .with_attached_deposit(1)
+                            .with_static_gas(C_GAS)
+                            .buy_token(amount, token_list, token_deposits);
+                        PromiseOrValue::Value(U128(0))
+                    }
+                }
+            }
+        }
     }
 }
 
