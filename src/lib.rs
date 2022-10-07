@@ -314,6 +314,10 @@ impl Contract {
         token_list: Vec<AccountId>,
         token_deposits: Vec<U128>,
     ) -> Promise {
+        assert!(
+            env::predecessor_account_id() == env::current_account_id(),
+            "Only Smart Contract can call this method"
+        );
         log!(
             "The buy_token call is initiated by {} with {:?} attached amount",
             env::signer_account_id(),
@@ -613,7 +617,10 @@ impl FungibleTokenReceiver for Contract {
     ) -> PromiseOrValue<U128> {
         let input_token = env::predecessor_account_id();
         if input_token != self.input_token {
-            log!("The Contract does not take {} as a Input Token",input_token);
+            log!(
+                "The Contract does not take {} as a Input Token",
+                input_token
+            );
             PromiseOrValue::Value(amount)
         } else {
             if msg.is_empty() {
