@@ -706,4 +706,46 @@ mod tests {
         );
         assert_eq!(contract.ft_balance_of(accounts(1)).0, transfer_amount);
     }
+
+    #[test]
+    fn test_mint() {
+        let mut context = get_context(accounts(2));
+        testing_env!(context.build());
+        let mut contract = Contract::new_default_meta(
+            accounts(2).into(),
+            TOTAL_SUPPLY.into(),
+            vec![],
+            vec![],
+            vec![],
+            AccountId::try_from("near.testnet".to_string()).unwrap(),
+            "10000".parse::<u128>().unwrap().into(),
+            "Manager_name".to_string(),
+            "100000".parse::<u128>().unwrap().into(),
+            "200".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "50".parse::<u128>().unwrap().into(),
+            "manager.testnet".parse().unwrap(),
+            "platform.testnet".parse().unwrap(),
+            "distributor.testnet".parse().unwrap(),
+        );
+        testing_env!(context
+            .storage_usage(env::storage_usage())
+            .attached_deposit(contract.storage_balance_bounds().min.into())
+            .predecessor_account_id(accounts(1))
+            .build());
+        contract.storage_deposit(None, None);
+        testing_env!(context
+            .storage_usage(env::storage_usage())
+            .attached_deposit(1)
+            .predecessor_account_id(accounts(0))
+            .build());
+        let total_supply_before_mint: u128 = contract.ft_total_supply().into();
+        let mint_token_count: u128 = 100000;
+        contract.ft_mint(accounts(1), U128(mint_token_count));
+        let total_supply_after_mint: u128 = contract.ft_total_supply().into();
+        assert_eq!(
+            total_supply_after_mint,
+            total_supply_before_mint + mint_token_count
+        );
+    }
 }
